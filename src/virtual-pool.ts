@@ -47,7 +47,18 @@ function createPoolProxy({
   const includesGtidContext = includesMode(mode, GTID_CONTEXT_ENABLED_MODE);
 
   return new Proxy(primary, {
-    get(target, prop, receiver) {
+    async get(target, prop, receiver) {
+      // test connections on replicas before testing the primary
+      if (prop === 'ping') {
+        await Promise.all(replicas.map((replica) => replica.ping()));
+        return Reflect.get(target, prop, receiver);
+      }
+      // test connections on
+      if (prop === 'destroy') {
+        replicas.forEach((replica) => replica.destroy());
+        return Reflect.get(target, prop, receiver);
+      }
+
       // only intercept query method
       if (prop !== 'query') {
         return Reflect.get(target, prop, receiver);
