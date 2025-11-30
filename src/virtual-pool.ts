@@ -9,7 +9,7 @@ import {
   includesMode,
 } from './pool-modes';
 import { isSuccessfulReplication, waitForReplication } from './query-runner';
-import * as Context from './gtid-context';
+import { getGtid } from './dd-trace-provider';
 
 /**
  * Configuration options for a virtual pool
@@ -46,6 +46,61 @@ function createPoolProxy({
   const includesReplicaSelection = includesMode(mode, REPLICA_SELECTION_MODE);
   const includesGtidContext = includesMode(mode, GTID_CONTEXT_ENABLED_MODE);
 
+  // Cache the query function to avoid recreating it on every access
+  const queryFunction = async function (
+    this: Pool,
+    ...args: Parameters<Pool['query']>
+  ) {
+    const { sql } = args[0];
+
+    if (isSelectQuery(sql) && includesReplicaSelection) {
+      let gtid: string | undefined;
+      let selected: Pool;
+
+      selected = selector.getNextReplica() ?? primary;
+      // only read gtid context if it is enabled
+      if (includesGtidContext) {
+        gtid = getGtid();
+      }
+
+      if (gtid) {
+        const result = await waitForReplication(
+          selected,
+          {
+            gtidSet: gtid,
+          },
+          { logger, timeout: timeout ?? 0.05 }, // default to wait 50ms
+        );
+
+        // Fallback to primary if wait for replica is unsuccessful
+        if (!isSuccessfulReplication(result)) {
+          logger?.warn(
+            {
+              sql: sql.substring(0, 100) as string,
+              gtid: gtid,
+            },
+            "Replica didn't respond in time, falling back to primary",
+          );
+          selected = primary;
+        }
+      } else {
+        logger?.debug('No GTID context found, skipping to replica');
+      }
+      return selected.query(...args);
+    }
+
+    // Default to primary for unrecognized queries (safer for writes)
+    logger?.debug(
+      {
+        sql: sql.substring(0, 100) as string,
+      },
+      'Routing unrecognized query to primary (defaulting to write behavior)',
+    );
+
+    // TODO: apply wrapper to get gtid on unsuccessful write
+    return primary.query(...args);
+  } as Pool['query'];
+
   return new Proxy(primary, {
     async get(target, prop, receiver) {
       // test connections on replicas before testing the primary
@@ -53,76 +108,25 @@ function createPoolProxy({
         await Promise.all(replicas.map((replica) => replica.ping()));
         return Reflect.get(target, prop, receiver);
       }
-      // test connections on
+
       if (prop === 'destroy') {
         replicas.forEach((replica) => replica.destroy());
         return Reflect.get(target, prop, receiver);
       }
 
-      // only intercept query method
-      if (prop !== 'query') {
-        return Reflect.get(target, prop, receiver);
+      // Return cached query function
+      if (prop === 'query') {
+        return queryFunction;
       }
 
-      let selected: Pool;
-      let ctx: Context.GTIDContext | undefined;
-      return async function (...args: unknown[]) {
-        const sql = args[0] as string;
-
-        if (isSelectQuery(sql) && includesReplicaSelection) {
-          selected = selector.getNextReplica() ?? primary;
-
-          // only read gtid context if it is enabled
-          if (includesGtidContext) {
-            ctx = Context.read();
-          }
-
-          if (ctx) {
-            const result = await waitForReplication(
-              selected,
-              {
-                gtidSet: ctx.gtid,
-              },
-              { logger, timeout: timeout ?? 0.05 }, // default to wait 50ms
-            );
-
-            // Fallback to primary if wait for replica is unsuccessful
-            if (!isSuccessfulReplication(result)) {
-              logger?.warn(
-                {
-                  sql: sql.substring(0, 100) as string,
-                  gtid: ctx.gtid,
-                },
-                "Replica didn't respond in time, falling back to primary",
-              );
-              selected = primary;
-            }
-          } else {
-            logger?.info('No GTID context found, skipping to replica');
-          }
-          return selected.query(...(args as Parameters<Pool['query']>));
-        }
-
-        // Default to primary for unrecognized queries (safer for writes)
-        logger?.debug(
-          {
-            sql: sql.substring(0, 100) as string,
-          },
-          'Routing unrecognized query to primary (defaulting to write behavior)',
-        );
-
-        return Reflect.apply(
-          Reflect.get(target, 'query', receiver) as Pool['query'],
-          receiver,
-          args,
-        );
-      } as Pool['query'];
+      // For all other properties, use default behavior
+      return Reflect.get(target, prop, receiver);
     },
   });
 }
 
 /**
- * Create a Monotone pool that automatically routes queries between primary and replicas
+ * Create a virtual pool that automatically routes queries between primary and replicas
  */
 export const createVirtualPool = (options: VirtualPoolOptions): Pool => {
   const primary = createPool(options.primary);
@@ -131,6 +135,7 @@ export const createVirtualPool = (options: VirtualPoolOptions): Pool => {
     // track session ids so they are returned on writes
     primary.on('connection', async (conn) => {
       await conn.query('SET SESSION session_track_gtids = OWN_GTID');
+      options.logger?.info('GTID context enabled');
     });
   }
 

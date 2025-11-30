@@ -5,6 +5,10 @@ interface WaitResult extends RowDataPacket {
   wait_code: 0 | 1 | null; // the only possible values
 }
 
+interface GtidExecutedResult extends RowDataPacket {
+  gtid_executed: string;
+}
+
 const SUCCESS = 0;
 const TIMEOUT = 1;
 const ERROR = 2;
@@ -22,6 +26,19 @@ type WaitForReplicationOptions = {
 
 export function isSuccessfulReplication(result: WaitForReplicationResult) {
   return result === SUCCESS;
+}
+// TODO: wrap writes in a way that
+
+/**
+ * Get the latest GTID executed on a connection after a write operation
+ * This should be called on the same connection that performed the write
+ */
+export async function getGtidExecuted(pool: Pool): Promise<string | null> {
+  const [[row]] = await pool.query<GtidExecutedResult[]>(
+    'SELECT @@SESSION.gtid_executed AS gtid_executed',
+  );
+
+  return row?.gtid_executed || null;
 }
 
 export async function waitForReplication(

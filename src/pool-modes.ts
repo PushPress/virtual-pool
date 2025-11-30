@@ -2,7 +2,6 @@
  * Pool modes
  * Modes are hierarchical, with the the gtid-context-enabled including replica selection
  */
-
 export const DISABLED_MODE = 'disabled';
 export const REPLICA_SELECTION_MODE = 'replica-selection';
 export const GTID_CONTEXT_ENABLED_MODE = 'gtid-context-enabled';
