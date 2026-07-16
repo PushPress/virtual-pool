@@ -25,7 +25,7 @@
     "@eslint/js": "^9.36.0",
     "@rslib/core": "^0.15.0",
     "@types/node": "^24.6.1",
-    "dd-trace": "^5.80.0",
+    "dd-trace": "^5.100.0",
     "eslint": "^9.36.0",
     "globals": "^16.4.0",
     "prettier": "^3.6.2",
@@ -42,6 +42,6 @@
     "zongji": "^0.5.1"
   },
   "peerDependencies": {
-    "dd-trace": "^5.80.0"
+    "dd-trace": "^5.100.0"
   }
 }
